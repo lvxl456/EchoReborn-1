@@ -16,6 +16,9 @@ static NSString *const kERShortcutRescanNotification = @"com.strive.echoreborn/R
 static NSString *const kERShortcutOverridesKey = @"ShortcutOverrides";
 // 1.1.9-70 · 槽位绑定（与磁贴侧 ERShortcutModule.h 同键）：{"3": "<uuid>"}。
 static NSString *const kERShortcutSlotAssignmentsKey = @"ShortcutSlotAssignments";
+// 1.2.1-174.38 · 左滑删除时写入「被删槽号」，SpringBoard 读取后清除，确保即使跨进程
+// 读脏 / 通知漏达也能把该槽磁贴从系统启用列表移除（与 Tweak.xm 同键）。
+static NSString *const kERShortcutForceRemoveSlotKey = @"ERShortcutForceRemoveSlot";
 
 // Where SpringBoard publishes what it fetched. Same directory as the
 // diagnostics log, chosen because SpringBoard and this bundle run as `mobile`
@@ -697,6 +700,36 @@ static NSString *ERShortcutTimestampLine(NSDictionary *diagnostics) {
     NSString *uuid = rows[(NSUInteger)indexPath.row][@"uuid"];
     if (![uuid isKindOfClass:[NSString class]] || !uuid.length) return;
     [self.visibleUUIDs removeObject:uuid];
+    // 1.2.1-174.34 · 左滑删除补解绑槽位：原版只移出显示列表，槽位绑定
+    // ShortcutSlotAssignments 不清 → CC 磁贴残留可点击、注销后数量回退旧基线。
+    {
+        NSMutableDictionary<NSString *, NSString *> *updated = [NSMutableDictionary dictionary];
+        id stored = (__bridge_transfer id)CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)kERShortcutSlotAssignmentsKey,
+            (__bridge CFStringRef)kERShortcutPrefsDomain);
+        if ([stored isKindOfClass:[NSDictionary class]]) [updated addEntriesFromDictionary:stored];
+        BOOL changed = NO;
+        NSInteger removedSlot = 0;
+        for (NSString *key in [updated.allKeys copy]) {
+            if ([updated[key] isKindOfClass:[NSString class]] &&
+                [(NSString *)updated[key] isEqualToString:uuid]) {
+                [updated removeObjectForKey:key];
+                removedSlot = key.integerValue;
+                changed = YES;
+            }
+        }
+        if (changed) {
+            CFPreferencesSetAppValue((__bridge CFStringRef)kERShortcutSlotAssignmentsKey,
+                                     (__bridge CFPropertyListRef)[updated copy],
+                                     (__bridge CFStringRef)kERShortcutPrefsDomain);
+            CFPreferencesAppSynchronize((__bridge CFStringRef)kERShortcutPrefsDomain);
+            // 1.2.1-174.38 · 写瞬态「强制删除槽位」，让 SpringBoard 不依赖跨进程 diff 也能移除该磁贴
+            CFPreferencesSetAppValue((__bridge CFStringRef)kERShortcutForceRemoveSlotKey,
+                                     (__bridge CFPropertyListRef)@(removedSlot),
+                                     (__bridge CFStringRef)kERShortcutPrefsDomain);
+            CFPreferencesAppSynchronize((__bridge CFStringRef)kERShortcutPrefsDomain);
+        }
+    }
     [self persist];
     [tableView reloadData];
     ERShortcutLog(@"shortcutPane: 左滑移出显示列表 %@", uuid);
